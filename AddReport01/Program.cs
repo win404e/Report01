@@ -202,43 +202,27 @@ static void FormatDailyReport(IXLWorksheet worksheet)
     }
 }
 
-static DateTime? GetLatestReportDate(string workbookPath)
+static void UpsertDailyRows(string outputPath, string templatePath, IReadOnlyList<DailyReportRow> rows)
 {
-    if (!File.Exists(workbookPath))
-        return null;
-
-    using var workbook = new XLWorkbook(workbookPath);
-    var worksheet = workbook.Worksheet("DailyReport");
-    var dateColumn = worksheet.Row(1).CellsUsed()
-        .FirstOrDefault(cell => NormalizeHeader(cell.GetString()) == "date")?.Address.ColumnNumber;
-    if (dateColumn is null)
-        throw new InvalidOperationException("ไม่พบคอลัมน์ Date ในชีต DailyReport");
-
-    DateTime? latestDate = null;
-    var lastRow = worksheet.LastRowUsed()?.RowNumber() ?? 1;
-    var hasGroupedHeaders = NormalizeHeader(worksheet.Cell(1, 2).GetString()) == "financial" &&
-                            NormalizeHeader(worksheet.Cell(2, 2).GetString()) == "opd";
-    var firstDataRow = hasGroupedHeaders ? 3 : 2;
-    for (var row = firstDataRow; row <= lastRow; row++)
-    {
-        if (TryReadDateCell(worksheet.Cell(row, dateColumn.Value), out var date) &&
-            (latestDate is null || date > latestDate.Value))
-        {
-            latestDate = date;
-        }
-    }
-
-    return latestDate;
-}
-
-static void UpsertFinanceRows(string outputPath, string templatePath, IReadOnlyList<FinanceDailyRow> rows)
-{
+    var outputDirectory = Path.GetDirectoryName(outputPath)
+        ?? throw new InvalidOperationException("ไม่สามารถระบุโฟลเดอร์ปลายทางของรายงานได้");
+    Directory.CreateDirectory(outputDirectory);
     var outputExists = File.Exists(outputPath);
     var workbook = outputExists ? new XLWorkbook(outputPath) : new XLWorkbook(templatePath);
     using (workbook)
     {
         var worksheet = workbook.Worksheet("DailyReport");
         EnsureGroupedHeaders(worksheet);
+        string[] metricKeys =
+        [
+            "financialopd", "financialipd", "doctorfeeopd", "doctorfeeipd",
+            "labopdrequest", "labopdqty", "labopdamount",
+            "labipdrequest", "labipdqty", "labipdamount",
+            "xrayopdrequest", "xrayopdamount", "xrayipdrequest", "xrayipdamount",
+            "opdpatientold", "opdpatientnew", "opdpatienttotal",
+            "oldopdmale", "oldopdfemale", "oldopdchild",
+            "newopdmale", "newopdfemale", "newopdchild"
+        ];
         var columns = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var currentGroup = string.Empty;
         for (var column = 1; column <= 24; column++)
@@ -248,23 +232,21 @@ static void UpsertFinanceRows(string outputPath, string templatePath, IReadOnlyL
                 currentGroup = groupHeader;
             var subHeader = worksheet.Cell(2, column).GetString().Trim();
             var key = NormalizeHeader(currentGroup + subHeader);
-            if (key == "date") columns["date"] = column;
-            if (key == "financialopd") columns["financialo"] = column;
-            if (key == "financialipd") columns["financiali"] = column;
+            if (key == "date" || metricKeys.Contains(key, StringComparer.OrdinalIgnoreCase))
+                columns[key] = column;
         }
 
-        if (!columns.TryGetValue("date", out var dateColumn) ||
-            !columns.TryGetValue("financialo", out var opdColumn) ||
-            !columns.TryGetValue("financiali", out var ipdColumn))
+        var missingColumns = metricKeys.Where(key => !columns.ContainsKey(key)).ToList();
+        if (!columns.ContainsKey("date") || missingColumns.Count > 0)
         {
-            throw new InvalidOperationException("ชีต DailyReport ต้องมีคอลัมน์ Date, Financial O และ Financial I");
+            throw new InvalidOperationException("ชีต DailyReport ขาดหัวคอลัมน์ที่จำเป็น: " + string.Join(", ", missingColumns));
         }
 
         var lastRow = worksheet.LastRowUsed()?.RowNumber() ?? 2;
         var rowByDate = new Dictionary<DateTime, int>();
         for (var row = 3; row <= lastRow; row++)
         {
-            if (!TryReadDateCell(worksheet.Cell(row, dateColumn), out var date))
+            if (!TryReadDateCell(worksheet.Cell(row, columns["date"]), out var date))
                 continue;
             if (!rowByDate.TryAdd(date, row))
                 throw new InvalidOperationException($"พบวันที่ซ้ำในชีต DailyReport: {date:yyyy-MM-dd}");
@@ -278,10 +260,10 @@ static void UpsertFinanceRows(string outputPath, string templatePath, IReadOnlyL
                 rowByDate.Add(reportRow.Date, targetRow);
             }
 
-            worksheet.Cell(targetRow, dateColumn).Value = reportRow.Date;
-            worksheet.Cell(targetRow, dateColumn).Style.DateFormat.Format = "yyyy-mm-dd";
-            worksheet.Cell(targetRow, opdColumn).Value = reportRow.Opd;
-            worksheet.Cell(targetRow, ipdColumn).Value = reportRow.Ipd;
+            worksheet.Cell(targetRow, columns["date"]).Value = reportRow.Date;
+            worksheet.Cell(targetRow, columns["date"]).Style.DateFormat.Format = "yyyy-mm-dd";
+            for (var metricIndex = 0; metricIndex < metricKeys.Length; metricIndex++)
+                worksheet.Cell(targetRow, columns[metricKeys[metricIndex]]).Value = reportRow.Metrics[metricIndex];
         }
 
         FormatDailyReport(worksheet);
@@ -316,7 +298,11 @@ if ((startArgument is null) != (endArgument is null))
     return 1;
 }
 
-var outputPath = Path.GetFullPath(outputArgument ?? Path.Combine(Environment.CurrentDirectory, "Daily Report Dashboard - Grouped.xlsx"));
+var desktopDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+if (string.IsNullOrWhiteSpace(desktopDirectory))
+    desktopDirectory = @"C:\Users\atsawin.su\Desktop";
+var defaultOutputPath = Path.Combine(desktopDirectory, "win", "daily-report", "Daily Report Dashboard - Grouped.xlsx");
+var outputPath = Path.GetFullPath(outputArgument ?? defaultOutputPath);
 var templatePath = Path.Combine(AppContext.BaseDirectory, "Templates", "Daily Report Dashboard - Template.xlsx");
 if (string.Equals(outputPath, Path.GetFullPath(templatePath), StringComparison.OrdinalIgnoreCase))
 {
@@ -338,9 +324,28 @@ if (startArgument is not null && endArgument is not null)
 }
 else
 {
-    var lastSavedDate = GetLatestReportDate(outputPath);
-    startDate = lastSavedDate?.AddDays(1) ?? new DateTime(DateTime.Today.Year - 1, 1, 1);
-    endDate = DateTime.Today;
+    Console.WriteLine("กรุณากรอกวันที่ (รูปแบบ yyyy-MM-dd)");
+    Console.Write("เริ่มต้น - ");
+    var startInput = Console.ReadLine();
+    Console.Write("สิ้นสุด - ");
+    var endInput = Console.ReadLine();
+
+    if (string.IsNullOrWhiteSpace(startInput) || string.IsNullOrWhiteSpace(endInput))
+    {
+        Console.Error.WriteLine("กรุณากรอกวันที่เริ่มต้นและวันที่สิ้นสุดให้ครบ");
+        return 1;
+    }
+
+    try
+    {
+        startDate = ParseCommandDate(startInput, "เริ่มต้น");
+        endDate = ParseCommandDate(endInput, "สิ้นสุด");
+    }
+    catch (ArgumentException ex)
+    {
+        Console.Error.WriteLine(ex.Message);
+        return 1;
+    }
 }
 
 if (startDate > endDate)
@@ -351,7 +356,7 @@ if (startDate > endDate)
 
 var startKey = startDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
 var endExclusiveKey = endDate.AddDays(1).ToString("yyyyMMdd", CultureInfo.InvariantCulture);
-Console.WriteLine($"กำลังดึงยอดการเงินวันที่ {startDate:yyyy-MM-dd} ถึง {endDate:yyyy-MM-dd}");
+Console.WriteLine($"กำลังดึงข้อมูลรายงานวันที่ {startDate:yyyy-MM-dd} ถึง {endDate:yyyy-MM-dd}");
 
 try
 {
@@ -359,7 +364,7 @@ try
         .UseSqlServer(connectionString, sql => sql.CommandTimeout(commandTimeout))
         .Options;
 
-    List<FinanceDailyRow> reportRows;
+    List<DailyReportRow> reportRows;
     await using (var database = new ReportDbContext(options))
     {
         // คำสั่งนี้จะถูกแปลงเป็น SQL และประมวลผลที่ Database Server โดยตรง
@@ -394,14 +399,50 @@ try
             .OrderBy(row => row.DateKey)
             .ToListAsync();
 
-        // แปลงผลลัพธ์ที่ได้ให้อยู่ในรูปแบบ Object ที่เตรียมไว้สำหรับส่งเข้า Excel
-        reportRows = aggregatedRows
+        var financeRows = aggregatedRows
             .Select(row => new FinanceDailyRow(row.DateKey, row.Opd, row.Ipd))
+            .ToDictionary(row => row.DateKey, StringComparer.Ordinal);
+
+        var operationalRows = await ReportDataQueries.GetOperationalDailyRowsAsync(database, startKey, endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
+        var patientRows = await ReportDataQueries.GetOpdPatientDailyRowsAsync(database, startKey, endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
+        var patientRowsByDate = patientRows.ToDictionary(row => row.DateKey, StringComparer.Ordinal);
+        reportRows = operationalRows
+            .Select(row =>
+            {
+                financeRows.TryGetValue(row.DateKey, out var finance);
+                patientRowsByDate.TryGetValue(row.DateKey, out var patients);
+                return new DailyReportRow(row.DateKey,
+                [
+                    finance?.Opd ?? 0m,
+                    finance?.Ipd ?? 0m,
+                    row.DoctorFeeO,
+                    row.DoctorFeeI,
+                    row.LabORequest,
+                    row.LabOQty,
+                    row.LabOAmount,
+                    row.LabIRequest,
+                    row.LabIQty,
+                    row.LabIAmount,
+                    row.XrayORequest,
+                    row.XrayOAmount,
+                    row.XrayIRequest,
+                    row.XrayIAmount,
+                    patients?.OldTotal ?? 0,
+                    patients?.NewTotal ?? 0,
+                    patients?.Total ?? 0,
+                    patients?.OldMale ?? 0,
+                    patients?.OldFemale ?? 0,
+                    patients?.OldChild ?? 0,
+                    patients?.NewMale ?? 0,
+                    patients?.NewFemale ?? 0,
+                    patients?.NewChild ?? 0
+                ]);
+            })
             .ToList();
     }
 
-    UpsertFinanceRows(outputPath, templatePath, reportRows);
-    Console.WriteLine($"บันทึกยอด OPD/IPD จำนวน {reportRows.Count} วันลงชีต DailyReport แล้ว: {outputPath}");
+    UpsertDailyRows(outputPath, templatePath, reportRows);
+    Console.WriteLine($"บันทึกรายงานครบ {reportRows.Count} วัน ลงชีต DailyReport แล้ว: {outputPath}");
 }
 catch (SqlException ex)
 {
