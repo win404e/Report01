@@ -2,6 +2,13 @@ using Microsoft.EntityFrameworkCore;
 
 public static class ReportDataQueries
 {
+    private static readonly string[] ActiveDepartmentCodes =
+    [
+        "ACP", "ANS", "CHK", "CHKIS", "CHKP", "DENT", "DRESS", "ENT", "ER", "EYE", "HCT", "HEMO",
+        "LAB", "MED", "OBGY", "OPREM", "ORTHO", "OUTSD", "PED", "PHA", "PHY", "PSY", "SKIN", "SURG",
+        "WBC", "XRAY"
+    ];
+
     public static async Task<List<OperationalDailyRow>> GetOperationalDailyRowsAsync(
         ReportDbContext database,
         string startKey,
@@ -223,6 +230,74 @@ public static class ReportDataQueries
         return counts;
     }
 
+    public static async Task<List<RatioByTimeRow>> GetRatioByTimeRowsAsync(
+        ReportDbContext database,
+        DateTime startDate,
+        DateTime endDate)
+    {
+        var startKey = startDate.ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture);
+        var endKey = endDate.ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture);
+        var startBound = startKey + "0000";
+        var endBound = endKey + "2359";
+
+        var departmentNames = new List<(string Code, string Name)>();
+        foreach (var code in ActiveDepartmentCodes)
+        {
+            var name = await database.OcmInfRows
+                .AsNoTracking()
+                .Select(_ => database.GetDepartmentName(code, endKey))
+                .FirstOrDefaultAsync();
+            departmentNames.Add((code, name?.Trim() ?? ""));
+        }
+
+        var visitAggregates = await database.OcmInfRows
+            .AsNoTracking()
+            .Where(row => row.OcmAcpDtm != null &&
+                          string.Compare(row.OcmAcpDtm, startBound) >= 0 &&
+                          string.Compare(row.OcmAcpDtm, endBound) <= 0 &&
+                          row.OcmPatTyp == "O" &&
+                          row.OcmVstNum != null && row.OcmVstNum != "          " &&
+                          row.OcmComStt != null &&
+                          row.OcmComStt != "CN" && row.OcmComStt != "CI" && row.OcmComStt != "CR" &&
+                          row.OcmDepCod != null && ActiveDepartmentCodes.Contains(row.OcmDepCod))
+            .GroupBy(row => new
+            {
+                DateKey = row.OcmAcpDtm!.Substring(0, 8),
+                DepCode = row.OcmDepCod,
+                TimeCode = string.Compare(row.OcmAcpDtm!.Substring(8, 4), "0800") >= 0 &&
+                           string.Compare(row.OcmAcpDtm!.Substring(8, 4), "1600") <= 0
+                    ? "T1"
+                    : "T2"
+            })
+            .Select(group => new TimeVisitAggregate
+            {
+                DateKey = group.Key.DateKey,
+                DepCode = group.Key.DepCode,
+                TimeCode = group.Key.TimeCode,
+                VisitTotal = group.Count()
+            })
+            .ToListAsync();
+
+        var visitsByKey = visitAggregates.ToDictionary(
+            row => (row.DateKey, row.DepCode?.Trim() ?? "", row.TimeCode),
+            row => row.VisitTotal);
+        var rows = new List<RatioByTimeRow>();
+        for (var date = startDate.Date; date <= endDate.Date; date = date.AddDays(1))
+        {
+            var dateKey = date.ToString("yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture);
+            foreach (var department in departmentNames.OrderBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase))
+            {
+                foreach (var timeCode in new[] { "T1", "T2" })
+                {
+                    visitsByKey.TryGetValue((dateKey, department.Code, timeCode), out var total);
+                    rows.Add(new RatioByTimeRow(date, department.Name, timeCode, total));
+                }
+            }
+        }
+
+        return rows;
+    }
+
     private sealed class RawStsRow
     {
         public string? PatientType { get; set; }
@@ -264,6 +339,14 @@ public static class ReportDataQueries
         public string? Age { get; set; }
         public string? NewRepeatFlag { get; set; }
     }
+
+    private sealed class TimeVisitAggregate
+    {
+        public string DateKey { get; set; } = "";
+        public string? DepCode { get; set; }
+        public string TimeCode { get; set; } = "";
+        public int VisitTotal { get; set; }
+    }
 }
 
 public sealed record OperationalDailyRow(
@@ -299,3 +382,5 @@ public sealed record OpdPatientDailyRow(
     public int NewTotal => NewMale + NewFemale + NewChild;
     public int Total => OldTotal + NewTotal;
 }
+
+public sealed record RatioByTimeRow(DateTime VisitDate, string DepName, string TimeCode, int Total);

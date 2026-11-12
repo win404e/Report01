@@ -275,6 +275,93 @@ static void UpsertDailyRows(string outputPath, string templatePath, IReadOnlyLis
     }
 }
 
+static void UpsertRatioByTimeRows(string outputPath, IReadOnlyList<RatioByTimeRow> rows)
+{
+    using var workbook = new XLWorkbook(outputPath);
+    var worksheet = workbook.Worksheet("Ratios by time");
+    var columns = worksheet.Row(1).CellsUsed()
+        .ToDictionary(cell => NormalizeHeader(cell.GetString()), cell => cell.Address.ColumnNumber, StringComparer.OrdinalIgnoreCase);
+    string[] requiredHeaders = ["date", "depname", "time", "total"];
+    var missingHeaders = requiredHeaders.Where(header => !columns.ContainsKey(header)).ToList();
+    if (missingHeaders.Count > 0)
+        throw new InvalidOperationException("ชีต Ratios by time ขาดหัวคอลัมน์: " + string.Join(", ", missingHeaders));
+
+    var header = worksheet.Range(1, 1, 1, 4);
+    header.Style.Fill.BackgroundColor = XLColor.FromHtml("#163A5F");
+    header.Style.Font.FontName = "Arial";
+    header.Style.Font.FontSize = 10;
+    header.Style.Font.Bold = true;
+    header.Style.Font.FontColor = XLColor.White;
+    header.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+    header.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+    header.Style.Alignment.WrapText = true;
+    header.Style.Border.BottomBorder = XLBorderStyleValues.Medium;
+    header.Style.Border.BottomBorderColor = XLColor.FromHtml("#2F75B5");
+    worksheet.Row(1).Height = 26;
+    worksheet.SheetView.FreezeRows(1);
+
+    var lastRow = worksheet.LastRowUsed()?.RowNumber() ?? 1;
+    var rowByKey = new Dictionary<(DateTime Date, string Department, string Time), int>();
+    for (var row = 2; row <= lastRow; row++)
+    {
+        if (!TryReadDateCell(worksheet.Cell(row, columns["date"]), out var date))
+            continue;
+        var department = worksheet.Cell(row, columns["depname"]).GetString().Trim();
+        var timeCode = worksheet.Cell(row, columns["time"]).GetString().Trim();
+        var key = (date, department, timeCode);
+        if (!rowByKey.TryAdd(key, row))
+            throw new InvalidOperationException($"พบข้อมูลซ้ำในชีต Ratios by time: {date:yyyy-MM-dd}, {department}, {timeCode}");
+    }
+
+    foreach (var reportRow in rows.OrderBy(row => row.VisitDate)
+                                  .ThenBy(row => row.DepName, StringComparer.CurrentCultureIgnoreCase)
+                                  .ThenBy(row => row.TimeCode, StringComparer.Ordinal))
+    {
+        var key = (reportRow.VisitDate.Date, reportRow.DepName.Trim(), reportRow.TimeCode);
+        if (!rowByKey.TryGetValue(key, out var targetRow))
+        {
+            targetRow = ++lastRow;
+            rowByKey.Add(key, targetRow);
+        }
+
+        worksheet.Cell(targetRow, columns["date"]).Value = reportRow.VisitDate.Date;
+        worksheet.Cell(targetRow, columns["date"]).Style.DateFormat.Format = "yyyy-mm-dd";
+        worksheet.Cell(targetRow, columns["depname"]).Value = reportRow.DepName.Trim();
+        worksheet.Cell(targetRow, columns["time"]).Value = reportRow.TimeCode;
+        worksheet.Cell(targetRow, columns["total"]).Value = reportRow.Total;
+    }
+
+    worksheet.Column(columns["date"]).Width = 14;
+    worksheet.Column(columns["depname"]).Width = 30;
+    worksheet.Column(columns["time"]).Width = 10;
+    worksheet.Column(columns["total"]).Width = 14;
+    if (lastRow >= 2)
+    {
+        var dataRange = worksheet.Range(2, 1, lastRow, 4);
+        dataRange.Style.Font.FontName = "Arial";
+        dataRange.Style.Font.FontSize = 10;
+        dataRange.Style.Font.FontColor = XLColor.FromHtml("#243447");
+        dataRange.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+        worksheet.Range(2, columns["date"], lastRow, columns["date"])
+            .Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+        worksheet.Range(2, columns["time"], lastRow, columns["time"])
+            .Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+        worksheet.Range(2, columns["total"], lastRow, columns["total"])
+            .Style.NumberFormat.Format = "#,##0;[Red]-#,##0";
+        worksheet.Range(2, columns["total"], lastRow, columns["total"])
+            .Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Right;
+        for (var row = 2; row <= lastRow; row++)
+        {
+            worksheet.Row(row).Height = 20;
+            worksheet.Range(row, 1, row, 4).Style.Fill.BackgroundColor = row % 2 == 0
+                ? XLColor.FromHtml("#F2F6FA")
+                : XLColor.White;
+        }
+    }
+
+    workbook.Save();
+}
+
 // ใช้การตั้งค่า connection string ตามเดิม
 var builder = new ConfigurationBuilder()
     .SetBasePath(AppContext.BaseDirectory)
@@ -365,6 +452,7 @@ try
         .Options;
 
     List<DailyReportRow> reportRows;
+    List<RatioByTimeRow> ratioRows;
     await using (var database = new ReportDbContext(options))
     {
         // คำสั่งนี้จะถูกแปลงเป็น SQL และประมวลผลที่ Database Server โดยตรง
@@ -405,6 +493,7 @@ try
 
         var operationalRows = await ReportDataQueries.GetOperationalDailyRowsAsync(database, startKey, endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
         var patientRows = await ReportDataQueries.GetOpdPatientDailyRowsAsync(database, startKey, endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
+        ratioRows = await ReportDataQueries.GetRatioByTimeRowsAsync(database, startDate, endDate);
         var patientRowsByDate = patientRows.ToDictionary(row => row.DateKey, StringComparer.Ordinal);
         reportRows = operationalRows
             .Select(row =>
@@ -442,7 +531,8 @@ try
     }
 
     UpsertDailyRows(outputPath, templatePath, reportRows);
-    Console.WriteLine($"บันทึกรายงานครบ {reportRows.Count} วัน ลงชีต DailyReport แล้ว: {outputPath}");
+    UpsertRatioByTimeRows(outputPath, ratioRows);
+    Console.WriteLine($"บันทึกรายงาน {reportRows.Count} วัน และ Ratios by time {ratioRows.Count} แถวแล้ว: {outputPath}");
 }
 catch (SqlException ex)
 {

@@ -22,6 +22,9 @@ public sealed class ReportDbContext(DbContextOptions<ReportDbContext> options) :
     public IQueryable<StsOdlEndRow> StsOdlEnd(string startDate, string endDate, string patientType, string receiptType) =>
         FromExpression(() => StsOdlEnd(startDate, endDate, patientType, receiptType));
 
+    public string? GetDepartmentName(string departmentCode, string dateKey) =>
+        throw new InvalidOperationException("This function can only be used inside an EF Core query.");
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<OrpInfRow>(entity =>
@@ -65,6 +68,7 @@ public sealed class ReportDbContext(DbContextOptions<ReportDbContext> options) :
             entity.Property(row => row.OcmDgsNfs).HasColumnName("OcmDgsNfs");
             entity.Property(row => row.OcmVstNum).HasColumnName("OcmVstNum");
             entity.Property(row => row.OcmComStt).HasColumnName("OcmComStt");
+            entity.Property(row => row.OcmDepCod).HasColumnName("OcmDepCod");
         });
 
         modelBuilder.Entity<OcmHstRow>(entity =>
@@ -102,6 +106,10 @@ public sealed class ReportDbContext(DbContextOptions<ReportDbContext> options) :
             nameof(StsOdlEnd), [typeof(string), typeof(string), typeof(string), typeof(string)])!);
         stsOdlEnd.HasName("STS_OdlEnd").HasSchema("dbo");
 
+        var getDepartmentName = modelBuilder.HasDbFunction(typeof(ReportDbContext).GetMethod(
+            nameof(GetDepartmentName), [typeof(string), typeof(string)])!);
+        getDepartmentName.HasName("GetDepartmentName").HasSchema("dbo");
+
         var stsOdlEndResult = modelBuilder.Entity<StsOdlEndRow>();
         stsOdlEndResult.HasNoKey();
         stsOdlEndResult.Property(row => row.IncNam).HasColumnName("IncNam");
@@ -135,6 +143,7 @@ public sealed class OcmInfRow
     public string? OcmDgsNfs { get; set; }
     public string? OcmVstNum { get; set; }
     public string? OcmComStt { get; set; }
+    public string? OcmDepCod { get; set; }
 }
 
 public sealed class OcmHstRow
