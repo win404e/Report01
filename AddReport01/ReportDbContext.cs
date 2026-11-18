@@ -2,11 +2,16 @@ using Microsoft.EntityFrameworkCore;
 
 public sealed class OrpInfRow
 {
+    public string? OrpOcmNum { get; set; }
+    public string? OrpCtrCod { get; set; }
+    public short? OrpInsCod { get; set; }
+    public string? OrpUidCod { get; set; }
     public string? OrpUpdDtm { get; set; }
     public string? OrpPattyp { get; set; }
     public string? OrpBilNum { get; set; }
     public decimal? OrpTotAmt { get; set; }
     public decimal? OrpInsAmt { get; set; }
+    public decimal? OrpDisAmt { get; set; }
 }
 
 public sealed class ReportDbContext(DbContextOptions<ReportDbContext> options) : DbContext(options)
@@ -18,11 +23,20 @@ public sealed class ReportDbContext(DbContextOptions<ReportDbContext> options) :
     public DbSet<OcmHstRow> OcmHstRows => Set<OcmHstRow>();
     public DbSet<PbsInfRow> PbsInfRows => Set<PbsInfRow>();
     public DbSet<LbqInfRow> LbqInfRows => Set<LbqInfRow>();
+    public DbSet<OdlInfRow> OdlInfRows => Set<OdlInfRow>();
+    public DbSet<InsMstRow> InsMstRows => Set<InsMstRow>();
+    public DbSet<CrdInfRow> CrdInfRows => Set<CrdInfRow>();
+    public DbSet<DtlMstRow> DtlMstRows => Set<DtlMstRow>();
+    public DbSet<UidMstRow> UidMstRows => Set<UidMstRow>();
+    public DbSet<OcmEndRow> OcmEndRows => Set<OcmEndRow>();
 
     public IQueryable<StsOdlEndRow> StsOdlEnd(string startDate, string endDate, string patientType, string receiptType) =>
         FromExpression(() => StsOdlEnd(startDate, endDate, patientType, receiptType));
 
     public string? GetDepartmentName(string departmentCode, string dateKey) =>
+        throw new InvalidOperationException("This function can only be used inside an EF Core query.");
+
+    public int? IsSqlDate(string? value) =>
         throw new InvalidOperationException("This function can only be used inside an EF Core query.");
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -31,11 +45,16 @@ public sealed class ReportDbContext(DbContextOptions<ReportDbContext> options) :
         {
             entity.HasNoKey();
             entity.ToTable("orpinf");
+            entity.Property(row => row.OrpOcmNum).HasColumnName("OrpOcmNum");
+            entity.Property(row => row.OrpCtrCod).HasColumnName("OrpCtrCod");
+            entity.Property(row => row.OrpInsCod).HasColumnName("OrpInsCod");
+            entity.Property(row => row.OrpUidCod).HasColumnName("OrpUidCod");
             entity.Property(row => row.OrpUpdDtm).HasColumnName("orpupddtm");
             entity.Property(row => row.OrpPattyp).HasColumnName("OrpPattyp");
             entity.Property(row => row.OrpBilNum).HasColumnName("OrpBilNum");
             entity.Property(row => row.OrpTotAmt).HasColumnName("OrpTotAmt");
             entity.Property(row => row.OrpInsAmt).HasColumnName("OrpInsAmt");
+            entity.Property(row => row.OrpDisAmt).HasColumnName("OrpDisAmt");
         });
 
         modelBuilder.Entity<SbsInfRow>(entity =>
@@ -44,6 +63,7 @@ public sealed class ReportDbContext(DbContextOptions<ReportDbContext> options) :
             entity.ToTable("SbsInf");
             entity.Property(row => row.SbsNum).HasColumnName("SbsNum");
             entity.Property(row => row.SbsAccDte).HasColumnName("SbsAccDte");
+            entity.Property(row => row.SbsCurStt).HasColumnName("SbsCurStt");
         });
 
         modelBuilder.Entity<OdrInfRow>(entity =>
@@ -90,6 +110,7 @@ public sealed class ReportDbContext(DbContextOptions<ReportDbContext> options) :
             entity.ToTable("PbsInf");
             entity.Property(row => row.PbsChtNum).HasColumnName("PbsChtNum");
             entity.Property(row => row.PbsSexTyp).HasColumnName("PbsSexTyp");
+            entity.Property(row => row.PbsBirDte).HasColumnName("PbsBirDte");
         });
 
         modelBuilder.Entity<LbqInfRow>(entity =>
@@ -102,6 +123,60 @@ public sealed class ReportDbContext(DbContextOptions<ReportDbContext> options) :
             entity.Property(row => row.LbqChtNum).HasColumnName("LbqChtNum");
         });
 
+        modelBuilder.Entity<OdlInfRow>(entity =>
+        {
+            entity.HasNoKey();
+            entity.ToTable("OdlInf");
+            entity.Property(row => row.OdlOcmNum).HasColumnName("OdlOcmNum");
+            entity.Property(row => row.OdlTotAmt).HasColumnName("OdlTotAmt");
+            entity.Property(row => row.OdlChkAmt).HasColumnName("OdlChkAmt");
+            entity.Property(row => row.OdlCtrTyp).HasColumnName("OdlCtrTyp");
+        });
+
+        modelBuilder.Entity<InsMstRow>(entity =>
+        {
+            entity.HasNoKey();
+            entity.ToTable("InsMst");
+            entity.Property(row => row.InsCod).HasColumnName("InsCod");
+            entity.Property(row => row.InsCodNam).HasColumnName("InsCodNam");
+        });
+
+        modelBuilder.Entity<CrdInfRow>(entity =>
+        {
+            entity.HasNoKey();
+            entity.ToTable("CrdInf");
+            entity.Property(row => row.CrdOcmNum).HasColumnName("CrdOcmNum");
+            entity.Property(row => row.CrdCod).HasColumnName("CrdCod");
+        });
+
+        modelBuilder.Entity<DtlMstRow>(entity =>
+        {
+            entity.HasNoKey();
+            entity.ToTable("DtlMst");
+            entity.Property(row => row.DtlTblCod).HasColumnName("DtlTblCod");
+            entity.Property(row => row.DtlCod).HasColumnName("DtlCod");
+            entity.Property(row => row.DtlCodNam).HasColumnName("DtlCodNam");
+        });
+
+        modelBuilder.Entity<UidMstRow>(entity =>
+        {
+            entity.HasNoKey();
+            entity.ToTable("UidMst");
+            entity.Property(row => row.UidCod).HasColumnName("UidCod");
+            entity.Property(row => row.UidNam).HasColumnName("UidNam");
+        });
+
+        modelBuilder.Entity<OcmEndRow>(entity =>
+        {
+            entity.HasNoKey();
+            entity.ToTable("OcmEnd");
+            entity.Property(row => row.OcmSbsNum).HasColumnName("OcmSbsNum");
+            entity.Property(row => row.OcmChtNum).HasColumnName("OcmChtNum");
+            entity.Property(row => row.OcmPatTyp).HasColumnName("OcmPatTyp");
+            entity.Property(row => row.OcmComTyp).HasColumnName("OcmComTyp");
+            entity.Property(row => row.OcmWrdCod).HasColumnName("OcmWrdCod");
+        });
+
         var stsOdlEnd = modelBuilder.HasDbFunction(typeof(ReportDbContext).GetMethod(
             nameof(StsOdlEnd), [typeof(string), typeof(string), typeof(string), typeof(string)])!);
         stsOdlEnd.HasName("STS_OdlEnd").HasSchema("dbo");
@@ -109,6 +184,10 @@ public sealed class ReportDbContext(DbContextOptions<ReportDbContext> options) :
         var getDepartmentName = modelBuilder.HasDbFunction(typeof(ReportDbContext).GetMethod(
             nameof(GetDepartmentName), [typeof(string), typeof(string)])!);
         getDepartmentName.HasName("GetDepartmentName").HasSchema("dbo");
+
+        var isSqlDate = modelBuilder.HasDbFunction(typeof(ReportDbContext).GetMethod(
+            nameof(IsSqlDate), [typeof(string)])!);
+        isSqlDate.HasName("ISDATE").IsBuiltIn();
 
         var stsOdlEndResult = modelBuilder.Entity<StsOdlEndRow>();
         stsOdlEndResult.HasNoKey();
@@ -123,6 +202,16 @@ public sealed class SbsInfRow
 {
     public long? SbsNum { get; set; }
     public string? SbsAccDte { get; set; }
+    public string? SbsCurStt { get; set; }
+}
+
+public sealed class OcmEndRow
+{
+    public long? OcmSbsNum { get; set; }
+    public string? OcmChtNum { get; set; }
+    public string? OcmPatTyp { get; set; }
+    public string? OcmComTyp { get; set; }
+    public string? OcmWrdCod { get; set; }
 }
 
 public sealed class OdrInfRow
@@ -161,6 +250,7 @@ public sealed class PbsInfRow
 {
     public string? PbsChtNum { get; set; }
     public string? PbsSexTyp { get; set; }
+    public string? PbsBirDte { get; set; }
 }
 
 public sealed class LbqInfRow
@@ -169,6 +259,39 @@ public sealed class LbqInfRow
     public string? LbqRsvDte { get; set; }
     public string? LbqTrnDep { get; set; }
     public string? LbqChtNum { get; set; }
+}
+
+public sealed class OdlInfRow
+{
+    public string? OdlOcmNum { get; set; }
+    public decimal? OdlTotAmt { get; set; }
+    public decimal? OdlChkAmt { get; set; }
+    public string? OdlCtrTyp { get; set; }
+}
+
+public sealed class InsMstRow
+{
+    public short? InsCod { get; set; }
+    public string? InsCodNam { get; set; }
+}
+
+public sealed class CrdInfRow
+{
+    public string? CrdOcmNum { get; set; }
+    public string? CrdCod { get; set; }
+}
+
+public sealed class DtlMstRow
+{
+    public string? DtlTblCod { get; set; }
+    public string? DtlCod { get; set; }
+    public string? DtlCodNam { get; set; }
+}
+
+public sealed class UidMstRow
+{
+    public string? UidCod { get; set; }
+    public string? UidNam { get; set; }
 }
 
 public sealed class StsOdlEndRow

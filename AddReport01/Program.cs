@@ -29,6 +29,9 @@ static string NormalizeHeader(string value)
     return normalized is "visitdate" or "dateapp" ? "date" : normalized;
 }
 
+static string ValueOrNull(string? value) =>
+    string.IsNullOrWhiteSpace(value) ? "NULL" : value.Trim();
+
 static bool TryReadDateCell(IXLCell cell, out DateTime date)
 {
     if (cell.TryGetValue<DateTime>(out var dateTime))
@@ -362,6 +365,314 @@ static void UpsertRatioByTimeRows(string outputPath, IReadOnlyList<RatioByTimeRo
     workbook.Save();
 }
 
+static void UpsertDepartmentOpdPatientRows(
+    string outputPath,
+    IReadOnlyList<DepartmentOpdPatientDailyRow> rows,
+    DateTime startDate,
+    DateTime endDate)
+{
+    using var workbook = new XLWorkbook(outputPath);
+    var worksheet = workbook.Worksheet("P.2 per dep");
+    var columns = worksheet.Row(1).CellsUsed()
+        .ToDictionary(cell => NormalizeHeader(cell.GetString()), cell => cell.Address.ColumnNumber, StringComparer.OrdinalIgnoreCase);
+
+    int GetColumn(params string[] names)
+    {
+        foreach (var name in names)
+            if (columns.TryGetValue(name, out var column))
+                return column;
+        throw new InvalidOperationException("ชีต P.2 per dep ขาดหัวคอลัมน์: " + string.Join(" / ", names));
+    }
+
+    var dateColumn = GetColumn("visitdate", "date");
+    var departmentColumn = GetColumn("depengnam", "depname");
+    var oldMaleColumn = GetColumn("oldmale");
+    var oldFemaleColumn = GetColumn("oldfemale");
+    // The supplied template spells this header New_Meal; retain the template and map it to NewMale.
+    var newMaleColumn = GetColumn("newmale", "newmeal");
+    var newFemaleColumn = GetColumn("newfemale");
+    var totalColumn = GetColumn("total");
+    var lastRow = worksheet.LastRowUsed()?.RowNumber() ?? 1;
+
+    // Replace only the requested period so reruns update existing days without duplicating rows.
+    for (var row = lastRow; row >= 2; row--)
+    {
+        if (TryReadDateCell(worksheet.Cell(row, dateColumn), out var existingDate) &&
+            existingDate >= startDate.Date && existingDate <= endDate.Date)
+            worksheet.Row(row).Delete();
+    }
+
+    lastRow = worksheet.LastRowUsed()?.RowNumber() ?? 1;
+    foreach (var item in rows.OrderBy(row => row.VisitDate).ThenBy(row => row.DepName, StringComparer.CurrentCultureIgnoreCase))
+    {
+        var row = ++lastRow;
+        worksheet.Cell(row, dateColumn).Value = item.VisitDate;
+        worksheet.Cell(row, dateColumn).Style.DateFormat.Format = "yyyy-mm-dd";
+        worksheet.Cell(row, departmentColumn).Value = item.DepName;
+        worksheet.Cell(row, oldMaleColumn).Value = item.OldMale;
+        worksheet.Cell(row, oldFemaleColumn).Value = item.OldFemale;
+        worksheet.Cell(row, newMaleColumn).Value = item.NewMale;
+        worksheet.Cell(row, newFemaleColumn).Value = item.NewFemale;
+        worksheet.Cell(row, totalColumn).Value = item.Total;
+
+        var dataRange = worksheet.Range(row, 1, row, Math.Max(7, worksheet.LastColumnUsed()?.ColumnNumber() ?? 7));
+        dataRange.Style.Font.FontName = "Arial";
+        dataRange.Style.Font.FontSize = 10;
+        dataRange.Style.Font.FontColor = XLColor.FromHtml("#243447");
+        dataRange.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+        dataRange.Style.Border.BottomBorder = XLBorderStyleValues.Hair;
+        dataRange.Style.Border.BottomBorderColor = XLColor.FromHtml("#D9E2EC");
+        dataRange.Style.Fill.BackgroundColor = row % 2 == 0 ? XLColor.FromHtml("#F2F6FA") : XLColor.White;
+        worksheet.Row(row).Height = 20;
+    }
+
+    worksheet.Column(dateColumn).Width = 14;
+    worksheet.Column(departmentColumn).Width = 32;
+    foreach (var column in new[] { oldMaleColumn, oldFemaleColumn, newMaleColumn, newFemaleColumn, totalColumn })
+    {
+        worksheet.Column(column).Width = 15;
+        worksheet.Column(column).Style.NumberFormat.Format = "#,##0;[Red]-#,##0";
+        worksheet.Column(column).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Right;
+    }
+    worksheet.SheetView.FreezeRows(1);
+    workbook.Save();
+}
+
+static void UpsertRppayRows(string outputPath, IReadOnlyList<RppayDailyRow> rows, DateTime startDate, DateTime endDate)
+{
+    using var workbook = new XLWorkbook(outputPath);
+    var worksheet = workbook.Worksheet("P2._RPPAY_1");
+    var columns = worksheet.Row(1).CellsUsed()
+        .ToDictionary(cell => NormalizeHeader(cell.GetString()), cell => cell.Address.ColumnNumber, StringComparer.OrdinalIgnoreCase);
+    string[] requiredHeaders = ["date", "name", "code", "cardname", "netamount"];
+    var missingHeaders = requiredHeaders.Where(header => !columns.ContainsKey(header)).ToList();
+    if (missingHeaders.Count > 0)
+        throw new InvalidOperationException("ชีต P2._RPPAY_1 ขาดหัวคอลัมน์: " + string.Join(", ", missingHeaders));
+
+    var lastRow = worksheet.LastRowUsed()?.RowNumber() ?? 1;
+    for (var row = lastRow; row >= 2; row--)
+    {
+        if (TryReadDateCell(worksheet.Cell(row, columns["date"]), out var existingDate) &&
+            existingDate >= startDate.Date && existingDate <= endDate.Date)
+            worksheet.Row(row).Delete();
+    }
+
+    lastRow = worksheet.LastRowUsed()?.RowNumber() ?? 1;
+    foreach (var item in rows.OrderBy(row => row.Date)
+                             .ThenBy(row => row.UserName, StringComparer.CurrentCultureIgnoreCase)
+                             .ThenBy(row => row.Code, StringComparer.Ordinal))
+    {
+        var row = ++lastRow;
+        worksheet.Cell(row, columns["date"]).Value = item.Date;
+        worksheet.Cell(row, columns["date"]).Style.DateFormat.Format = "yyyy-mm-dd";
+        worksheet.Cell(row, columns["name"]).Value = ValueOrNull(item.UserName);
+        worksheet.Cell(row, columns["code"]).Value = ValueOrNull(item.Code);
+        worksheet.Cell(row, columns["cardname"]).Value = ValueOrNull(item.CardName);
+        worksheet.Cell(row, columns["netamount"]).Value = item.NetAmount;
+
+        var dataRange = worksheet.Range(row, 1, row, 5);
+        dataRange.Style.Font.FontName = "Arial";
+        dataRange.Style.Font.FontSize = 10;
+        dataRange.Style.Font.FontColor = XLColor.FromHtml("#243447");
+        dataRange.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+        dataRange.Style.Border.BottomBorder = XLBorderStyleValues.Hair;
+        dataRange.Style.Border.BottomBorderColor = XLColor.FromHtml("#D9E2EC");
+        dataRange.Style.Fill.BackgroundColor = row % 2 == 0 ? XLColor.FromHtml("#F2F6FA") : XLColor.White;
+        worksheet.Row(row).Height = 20;
+    }
+
+    worksheet.Column(columns["date"]).Width = 14;
+    worksheet.Column(columns["name"]).Width = 24;
+    worksheet.Column(columns["code"]).Width = 16;
+    worksheet.Column(columns["cardname"]).Width = 26;
+    worksheet.Column(columns["netamount"]).Width = 18;
+    worksheet.Column(columns["netamount"]).Style.NumberFormat.Format = "#,##0.00;[Red]-#,##0.00";
+    worksheet.Column(columns["netamount"]).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Right;
+    worksheet.SheetView.FreezeRows(1);
+    workbook.Save();
+}
+
+static void UpsertRppay2Rows(string outputPath, IReadOnlyList<RppayByTypeRow> rows, DateTime startDate, DateTime endDate)
+{
+    using var workbook = new XLWorkbook(outputPath);
+    var worksheet = workbook.Worksheet("P2.RPPAY_2");
+    var columns = worksheet.Row(1).CellsUsed()
+        .ToDictionary(cell => NormalizeHeader(cell.GetString()), cell => cell.Address.ColumnNumber, StringComparer.OrdinalIgnoreCase);
+    string[] requiredHeaders = ["date", "status", "type", "code", "cardname", "sumtotalamount", "sumdiscount"];
+    var missingHeaders = requiredHeaders.Where(header => !columns.ContainsKey(header)).ToList();
+    if (missingHeaders.Count > 0)
+        throw new InvalidOperationException("ชีต P2.RPPAY_2 ขาดหัวคอลัมน์: " + string.Join(", ", missingHeaders));
+
+    var lastRow = worksheet.LastRowUsed()?.RowNumber() ?? 1;
+    for (var row = lastRow; row >= 2; row--)
+    {
+        if (TryReadDateCell(worksheet.Cell(row, columns["date"]), out var existingDate) &&
+            existingDate >= startDate.Date && existingDate <= endDate.Date)
+            worksheet.Row(row).Delete();
+    }
+
+    lastRow = worksheet.LastRowUsed()?.RowNumber() ?? 1;
+    foreach (var item in rows.OrderBy(row => row.Date)
+                             .ThenBy(row => row.Status, StringComparer.Ordinal)
+                             .ThenBy(row => row.Type, StringComparer.CurrentCultureIgnoreCase)
+                             .ThenBy(row => row.Code, StringComparer.Ordinal))
+    {
+        var row = ++lastRow;
+        worksheet.Cell(row, columns["date"]).Value = item.Date;
+        worksheet.Cell(row, columns["date"]).Style.DateFormat.Format = "yyyy-mm-dd";
+        worksheet.Cell(row, columns["status"]).Value = ValueOrNull(item.Status);
+        worksheet.Cell(row, columns["type"]).Value = ValueOrNull(item.Type);
+        worksheet.Cell(row, columns["code"]).Value = ValueOrNull(item.Code);
+        worksheet.Cell(row, columns["cardname"]).Value = ValueOrNull(item.CardName);
+        worksheet.Cell(row, columns["sumtotalamount"]).Value = item.SumTotalAmount;
+        worksheet.Cell(row, columns["sumdiscount"]).Value = item.SumDiscount;
+
+        var dataRange = worksheet.Range(row, 1, row, 7);
+        dataRange.Style.Font.FontName = "Arial";
+        dataRange.Style.Font.FontSize = 10;
+        dataRange.Style.Font.FontColor = XLColor.FromHtml("#243447");
+        dataRange.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+        dataRange.Style.Border.BottomBorder = XLBorderStyleValues.Hair;
+        dataRange.Style.Border.BottomBorderColor = XLColor.FromHtml("#D9E2EC");
+        dataRange.Style.Fill.BackgroundColor = row % 2 == 0 ? XLColor.FromHtml("#F2F6FA") : XLColor.White;
+        worksheet.Row(row).Height = 20;
+    }
+
+    worksheet.Column(columns["date"]).Width = 14;
+    worksheet.Column(columns["status"]).Width = 12;
+    worksheet.Column(columns["type"]).Width = 24;
+    worksheet.Column(columns["code"]).Width = 16;
+    worksheet.Column(columns["cardname"]).Width = 30;
+    foreach (var key in new[] { "sumtotalamount", "sumdiscount" })
+    {
+        worksheet.Column(columns[key]).Width = 20;
+        worksheet.Column(columns[key]).Style.NumberFormat.Format = "#,##0.00;[Red]-#,##0.00";
+        worksheet.Column(columns[key]).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Right;
+    }
+    worksheet.SheetView.FreezeRows(1);
+    workbook.Save();
+}
+
+static int UpsertWardSheets(
+    string outputPath,
+    IReadOnlyList<WardDailyCountRow> sourceRows,
+    DateTime startDate,
+    DateTime endDate)
+{
+    using var workbook = new XLWorkbook(outputPath);
+    var sheetMetrics = new Dictionary<string, Func<WardDailyCountRow, int>>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["WardInfo"] = row => row.WardInfo,
+        ["NewAdmit"] = row => row.NewAdmit,
+        ["Discharge"] = row => row.Discharge
+    };
+
+    var headerMaps = new Dictionary<string, (IXLWorksheet Worksheet, int DateColumn, Dictionary<string, int> WardColumns)>(StringComparer.OrdinalIgnoreCase);
+    foreach (var (sheetName, _) in sheetMetrics)
+    {
+        var worksheet = workbook.Worksheet(sheetName);
+        var headers = worksheet.Row(1).CellsUsed()
+            .ToDictionary(cell => NormalizeHeader(cell.GetString()), cell => cell.Address.ColumnNumber, StringComparer.OrdinalIgnoreCase);
+        if (!headers.TryGetValue("date", out var dateColumn))
+            throw new InvalidOperationException($"ชีต {sheetName} ไม่มีหัวคอลัมน์ Date");
+        var wardColumns = headers.Where(pair => pair.Key != "date")
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+        headerMaps[sheetName] = (worksheet, dateColumn, wardColumns);
+    }
+
+    var knownWards = headerMaps.Values.SelectMany(item => item.WardColumns.Keys)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    string ResolveWardHeader(string? wardCode, string patientGroup)
+    {
+        var normalized = NormalizeHeader(wardCode?.Trim() ?? "") switch
+        {
+            "w6bs" => "w6b",
+            "ns" => "nursery",
+            var value => value
+        };
+        var target = patientGroup == "PED" ? normalized + "ped" : normalized;
+        return knownWards.Contains(target) ? target : normalized;
+    }
+
+    var wardRows = sourceRows
+        .Where(row => !string.IsNullOrWhiteSpace(row.WardCode))
+        .GroupBy(row => (row.DateKey, Ward: ResolveWardHeader(row.WardCode, row.PatientGroup)))
+        .ToDictionary(
+            group => group.Key,
+            group => new WardDailyCountRow(
+                group.First().DateKey,
+                group.First().WardCode?.Trim(),
+                group.First().PatientGroup,
+                group.Sum(row => row.WardInfo),
+                group.Sum(row => row.NewAdmit),
+                group.Sum(row => row.Discharge)));
+
+    var unknownWards = sourceRows
+        .Select(row => new { Code = row.WardCode?.Trim() ?? "NULL", row.PatientGroup })
+        .Where(row => !knownWards.Contains(ResolveWardHeader(row.Code, row.PatientGroup)))
+        .Select(row => $"{row.Code} ({row.PatientGroup})")
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+    if (unknownWards.Count > 0)
+        throw new InvalidOperationException("ไม่พบหัวคอลัมน์วอร์ด/กลุ่มผู้ป่วยในชีตทั้งสาม: " + string.Join(", ", unknownWards));
+
+    var dateCount = 0;
+    for (var date = startDate.Date; date <= endDate.Date; date = date.AddDays(1))
+        dateCount++;
+
+    foreach (var (sheetName, metricSelector) in sheetMetrics)
+    {
+        var (worksheet, dateColumn, wardColumns) = headerMaps[sheetName];
+        var lastRow = worksheet.LastRowUsed()?.RowNumber() ?? 1;
+        for (var row = lastRow; row >= 2; row--)
+        {
+            if (TryReadDateCell(worksheet.Cell(row, dateColumn), out var existingDate) &&
+                existingDate >= startDate.Date && existingDate <= endDate.Date)
+                worksheet.Row(row).Delete();
+        }
+
+        lastRow = worksheet.LastRowUsed()?.RowNumber() ?? 1;
+        for (var date = startDate.Date; date <= endDate.Date; date = date.AddDays(1))
+        {
+            var rowNumber = ++lastRow;
+            var dateKey = date.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+            worksheet.Cell(rowNumber, dateColumn).Value = date;
+            worksheet.Cell(rowNumber, dateColumn).Style.DateFormat.Format = "yyyy-mm-dd";
+            foreach (var column in wardColumns.Values)
+                worksheet.Cell(rowNumber, column).Value = 0;
+
+            foreach (var ((rowDate, normalizedWard), values) in wardRows)
+            {
+                if (rowDate != dateKey || !wardColumns.TryGetValue(normalizedWard, out var column))
+                    continue;
+                worksheet.Cell(rowNumber, column).Value = metricSelector(values);
+            }
+
+            var rowRange = worksheet.Range(rowNumber, 1, rowNumber, worksheet.LastColumnUsed()?.ColumnNumber() ?? 1);
+            rowRange.Style.Font.FontName = "Arial";
+            rowRange.Style.Font.FontSize = 10;
+            rowRange.Style.Font.FontColor = XLColor.FromHtml("#243447");
+            rowRange.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+            rowRange.Style.Border.BottomBorder = XLBorderStyleValues.Hair;
+            rowRange.Style.Border.BottomBorderColor = XLColor.FromHtml("#D9E2EC");
+            rowRange.Style.Fill.BackgroundColor = rowNumber % 2 == 0 ? XLColor.FromHtml("#F2F6FA") : XLColor.White;
+            worksheet.Row(rowNumber).Height = 20;
+        }
+
+        worksheet.Column(dateColumn).Width = 14;
+        foreach (var column in wardColumns.Values)
+        {
+            worksheet.Column(column).Width = Math.Max(12, worksheet.Column(column).Width);
+            worksheet.Column(column).Style.NumberFormat.Format = "#,##0;[Red]-#,##0";
+            worksheet.Column(column).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Right;
+        }
+        worksheet.SheetView.FreezeRows(1);
+    }
+
+    workbook.Save();
+    return dateCount;
+}
+
 // ใช้การตั้งค่า connection string ตามเดิม
 var builder = new ConfigurationBuilder()
     .SetBasePath(AppContext.BaseDirectory)
@@ -453,6 +764,10 @@ try
 
     List<DailyReportRow> reportRows;
     List<RatioByTimeRow> ratioRows;
+    List<DepartmentOpdPatientDailyRow> departmentPatientRows;
+    List<RppayDailyRow> rppayRows;
+    List<RppayByTypeRow> rppay2Rows;
+    List<WardDailyCountRow> wardRows;
     await using (var database = new ReportDbContext(options))
     {
         // คำสั่งนี้จะถูกแปลงเป็น SQL และประมวลผลที่ Database Server โดยตรง
@@ -494,6 +809,20 @@ try
         var operationalRows = await ReportDataQueries.GetOperationalDailyRowsAsync(database, startKey, endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
         var patientRows = await ReportDataQueries.GetOpdPatientDailyRowsAsync(database, startKey, endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
         ratioRows = await ReportDataQueries.GetRatioByTimeRowsAsync(database, startDate, endDate);
+        departmentPatientRows = await ReportDataQueries.GetDepartmentOpdPatientDailyRowsAsync(
+            database,
+            startKey,
+            endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
+        var rppayData = await ReportDataQueries.GetRppayReportRowsAsync(
+            database,
+            startKey + "0000",
+            endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture) + "2359");
+        rppayRows = rppayData.ByUser;
+        rppay2Rows = rppayData.ByType;
+        wardRows = await ReportDataQueries.GetWardDailyCountsAsync(
+            database,
+            startKey,
+            endDate.ToString("yyyyMMdd", CultureInfo.InvariantCulture));
         var patientRowsByDate = patientRows.ToDictionary(row => row.DateKey, StringComparer.Ordinal);
         reportRows = operationalRows
             .Select(row =>
@@ -532,12 +861,18 @@ try
 
     UpsertDailyRows(outputPath, templatePath, reportRows);
     UpsertRatioByTimeRows(outputPath, ratioRows);
-    Console.WriteLine($"บันทึกรายงาน {reportRows.Count} วัน และ Ratios by time {ratioRows.Count} แถวแล้ว: {outputPath}");
+    UpsertDepartmentOpdPatientRows(outputPath, departmentPatientRows, startDate, endDate);
+    UpsertRppayRows(outputPath, rppayRows, startDate, endDate);
+    UpsertRppay2Rows(outputPath, rppay2Rows, startDate, endDate);
+    var wardDateRows = UpsertWardSheets(outputPath, wardRows, startDate, endDate);
+    Console.WriteLine($"บันทึกรายงาน {reportRows.Count} วัน, Ratios by time {ratioRows.Count} แถว, P.2 per dep {departmentPatientRows.Count} แถว, P2._RPPAY_1 {rppayRows.Count} แถว, P2.RPPAY_2 {rppay2Rows.Count} แถว และชีต WardInfo/NewAdmit/Discharge อย่างละ {wardDateRows} วันแล้ว: {outputPath}");
 }
 catch (SqlException ex)
 {
     var state = ex.Errors.Count > 0 ? ex.Errors[0].State : (byte)0;
     Console.Error.WriteLine($"การดึงข้อมูล SQL ไม่สำเร็จ (SQL error {ex.Number}, state {state})");
+    foreach (SqlError error in ex.Errors)
+        Console.Error.WriteLine($"รายละเอียด SQL (บรรทัด {error.LineNumber}): {error.Message}");
     return 1;
 }
 catch (Exception ex)

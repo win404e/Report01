@@ -9,6 +9,16 @@ public static class ReportDataQueries
         "WBC", "XRAY"
     ];
 
+    private static async Task<List<TResult>> LoadInChunksAsync<TValue, TResult>(
+        IEnumerable<TValue> values,
+        Func<TValue[], Task<List<TResult>>> loadChunk)
+    {
+        var results = new List<TResult>();
+        foreach (var chunk in values.Chunk(500))
+            results.AddRange(await loadChunk(chunk));
+        return results;
+    }
+
     public static async Task<List<OperationalDailyRow>> GetOperationalDailyRowsAsync(
         ReportDbContext database,
         string startKey,
@@ -230,6 +240,259 @@ public static class ReportDataQueries
         return counts;
     }
 
+    public static async Task<List<WardDailyCountRow>> GetWardDailyCountsAsync(
+        ReportDbContext database,
+        string startKey,
+        string endKey)
+    {
+        return await (
+            from endedVisit in database.OcmEndRows.AsNoTracking()
+            join subscriber in database.SbsInfRows.AsNoTracking()
+                on endedVisit.OcmSbsNum equals subscriber.SbsNum
+            join patientRow in database.PbsInfRows.AsNoTracking()
+                on endedVisit.OcmChtNum equals patientRow.PbsChtNum into patientJoin
+            from patient in patientJoin.DefaultIfEmpty()
+            where subscriber.SbsAccDte != null &&
+                  string.Compare(subscriber.SbsAccDte, startKey) >= 0 &&
+                  string.Compare(subscriber.SbsAccDte, endKey) <= 0 &&
+                  subscriber.SbsCurStt == "E" &&
+                  endedVisit.OcmPatTyp == "I" &&
+                  (endedVisit.OcmComTyp == "W" || endedVisit.OcmComTyp == "E" || endedVisit.OcmComTyp == "D")
+            let validDates = database.IsSqlDate(subscriber.SbsAccDte) == 1 &&
+                             patient.PbsBirDte != null &&
+                             database.IsSqlDate(patient.PbsBirDte.Substring(0, 8)) == 1
+            let age = validDates
+                ? Convert.ToInt32(subscriber.SbsAccDte!.Substring(0, 4)) -
+                  Convert.ToInt32(patient!.PbsBirDte!.Substring(0, 4)) -
+                  (string.Compare(subscriber.SbsAccDte!.Substring(4, 4), patient!.PbsBirDte!.Substring(4, 4)) < 0 ? 1 : 0)
+                : 15
+            group new { endedVisit, PatientGroup = age < 15 ? "PED" : "NORMAL" } by new
+            {
+                DateKey = subscriber.SbsAccDte,
+                WardCode = endedVisit.OcmWrdCod,
+                PatientGroup = age < 15 ? "PED" : "NORMAL"
+            }
+            into grouped
+            orderby grouped.Key.DateKey, grouped.Key.WardCode, grouped.Key.PatientGroup
+            select new WardDailyCountRow(
+                grouped.Key.DateKey!,
+                grouped.Key.WardCode,
+                grouped.Key.PatientGroup,
+                grouped.Count(row => row.endedVisit.OcmComTyp == "W"),
+                grouped.Count(row => row.endedVisit.OcmComTyp == "E"),
+                grouped.Count(row => row.endedVisit.OcmComTyp == "D")))
+            .ToListAsync();
+    }
+
+    public static async Task<List<DepartmentOpdPatientDailyRow>> GetDepartmentOpdPatientDailyRowsAsync(
+        ReportDbContext database,
+        string startKey,
+        string endKey)
+    {
+        var startBound = startKey + "0000";
+        var endBound = endKey + "2359";
+
+        var rows = await (
+            from visit in database.OcmInfRows.AsNoTracking()
+            where visit.OcmAcpDtm != null &&
+                  string.Compare(visit.OcmAcpDtm, startBound) >= 0 &&
+                  string.Compare(visit.OcmAcpDtm, endBound) <= 0 &&
+                  visit.OcmPatTyp == "O" &&
+                  visit.OcmVstNum != null && visit.OcmVstNum.Trim() != "" &&
+                  visit.OcmComStt != null && !visit.OcmComStt.StartsWith("C")
+            join patient in database.PbsInfRows.AsNoTracking()
+                on visit.OcmChtNum equals patient.PbsChtNum
+            group new { visit, patient } by new
+            {
+                DateKey = visit.OcmAcpDtm!.Substring(0, 8),
+                visit.OcmDepCod
+            }
+            into grouped
+            orderby grouped.Key.DateKey, grouped.Key.OcmDepCod
+            select new DepartmentOpdPatientDailyRow(
+                grouped.Key.DateKey,
+                database.GetDepartmentName(grouped.Key.OcmDepCod!, grouped.Key.DateKey) ?? "",
+                grouped.Count(row => row.patient.PbsSexTyp == "M" &&
+                    (row.visit.OcmDgsNfs == null || row.visit.OcmDgsNfs.Trim() == "" ||
+                     row.visit.OcmDgsNfs.Trim() == "0" || row.visit.OcmDgsNfs.Trim() == "2")),
+                grouped.Count(row => row.patient.PbsSexTyp == "F" &&
+                    (row.visit.OcmDgsNfs == null || row.visit.OcmDgsNfs.Trim() == "" ||
+                     row.visit.OcmDgsNfs.Trim() == "0" || row.visit.OcmDgsNfs.Trim() == "2")),
+                grouped.Count(row => row.patient.PbsSexTyp == "M" && row.visit.OcmDgsNfs == "1"),
+                grouped.Count(row => row.patient.PbsSexTyp == "F" && row.visit.OcmDgsNfs == "1"),
+                grouped.Count()))
+            .ToListAsync();
+
+        return rows;
+    }
+
+    public static async Task<RppayQueryRows> GetRppayReportRowsAsync(
+        ReportDbContext database,
+        string startDateTime,
+        string endDateTime)
+    {
+        var rawOrp = await database.OrpInfRows.AsNoTracking()
+            .Where(row => row.OrpUpdDtm != null &&
+                          string.Compare(row.OrpUpdDtm, startDateTime) >= 0 &&
+                          string.Compare(row.OrpUpdDtm, endDateTime) <= 0 &&
+                          row.OrpBilNum != null && row.OrpBilNum != "SKIP")
+            .Select(row => new RppaySourceRow(
+                row.OrpOcmNum,
+                row.OrpCtrCod == null ? "" : row.OrpCtrCod.Trim(),
+                row.OrpInsCod,
+                row.OrpUidCod == null ? null : row.OrpUidCod.Trim(),
+                row.OrpUpdDtm!,
+                row.OrpUpdDtm!.Substring(0, 8),
+                row.OrpTotAmt ?? 0m,
+                row.OrpDisAmt ?? 0m))
+            .ToListAsync();
+
+        var firstRawByVisit = rawOrp
+            .GroupBy(row => row.OcmNumber)
+            .Select(group => group.OrderBy(row => row.ContractCode == "TOTAL" ? 0 : 1)
+                .ThenBy(row => row.UpdateDateTime)
+                .First())
+            .ToList();
+
+        var insuranceCodes = rawOrp.Select(row => row.InsuranceCode).Where(code => code != null).Distinct().ToList();
+        var insuranceRows = insuranceCodes.Count == 0
+            ? []
+            : await database.InsMstRows.AsNoTracking()
+                .Where(row => row.InsCod != null && insuranceCodes.Contains(row.InsCod))
+                .Select(row => new { row.InsCod, row.InsCodNam })
+                .ToListAsync();
+        var insuranceTypes = insuranceRows
+            .Where(row => row.InsCod != null)
+            .GroupBy(row => row.InsCod!.Value)
+            .ToDictionary(group => group.Key, group => group.First().InsCodNam?.Trim());
+
+        var filteredRows = rawOrp
+            .Select(row => new
+            {
+                Row = row,
+                InsuranceType = insuranceTypes.TryGetValue(row.InsuranceCode ?? 0, out var type) ? type : null
+            })
+            .Where(item => item.InsuranceType != "Contract" ||
+                           firstRawByVisit.Any(first => ReferenceEquals(first, item.Row)))
+            .Select(item => new RppayFilteredRow(item.Row, item.InsuranceType))
+            .ToList();
+
+        var visitNumbers = filteredRows.Select(row => row.Source.OcmNumber).Where(number => number != null)
+            .Select(number => number!).Distinct().ToList();
+        var ocmRows = await LoadInChunksAsync(visitNumbers, batch => database.OcmInfRows.AsNoTracking()
+            .Where(row => row.OcmNum != null && batch.Contains(row.OcmNum))
+            .Select(row => new RppayPatientStatusRow(row.OcmNum, row.OcmPatTyp))
+            .ToListAsync());
+        var patientTypes = ocmRows.Where(row => row.OcmNumber != null).GroupBy(row => row.OcmNumber!.Trim())
+            .ToDictionary(group => group.Key, group => group.First().PatientType, StringComparer.OrdinalIgnoreCase);
+        var discountRows = await LoadInChunksAsync(visitNumbers, batch => database.OdlInfRows.AsNoTracking()
+            .Where(row => row.OdlOcmNum != null && batch.Contains(row.OdlOcmNum))
+            .Select(row => new RppayDiscountRow(row.OdlOcmNum, row.OdlTotAmt, row.OdlChkAmt, row.OdlCtrTyp))
+            .ToListAsync());
+        var contractDiscounts = discountRows
+            .Where(row => row.ContractType != null && row.ContractType.Trim() != "TOTAL")
+            .GroupBy(row => row.OcmNumber)
+            .Where(group => group.Key != null)
+            .ToDictionary(
+                group => group.Key!.Trim(),
+                group => group.Sum(row => (row.TotalAmount ?? 0m) * (row.CheckAmount ?? 0m)),
+                StringComparer.Ordinal);
+
+        foreach (var group in filteredRows.GroupBy(row => row.Source.OcmNumber))
+        {
+            var first = group.OrderBy(row => row.Source.ContractCode == "TOTAL" ? 0 : 1)
+                .ThenBy(row => row.Source.UpdateDateTime)
+                .First();
+            first.IsFirstVisitRow = true;
+        }
+
+        var cardRows = await LoadInChunksAsync(visitNumbers, batch => database.CrdInfRows.AsNoTracking()
+            .Where(row => row.CrdOcmNum != null && batch.Contains(row.CrdOcmNum))
+            .GroupBy(row => row.CrdOcmNum)
+            .Select(group => new RppayCardInfoRow(group.Key, group.Max(row => row.CrdCod)))
+            .ToListAsync());
+        var cardCodes = cardRows
+            .Where(row => row.OcmNumber != null)
+            .GroupBy(row => row.OcmNumber!)
+            .ToDictionary(
+                group => group.Key.Trim(),
+                group => group.First().Code?.Trim(),
+                StringComparer.OrdinalIgnoreCase);
+
+        var userCodes = filteredRows.Select(row => row.Source.UserCode).Where(code => code != null)
+            .Select(code => code!).Distinct().ToList();
+        var users = await LoadInChunksAsync(userCodes, batch => database.UidMstRows.AsNoTracking()
+            .Where(row => row.UidCod != null && batch.Contains(row.UidCod))
+            .Select(row => new RppayUserRow(row.UidCod, row.UidNam))
+            .ToListAsync());
+        var userNames = users.Where(row => row.UserCode != null).GroupBy(row => row.UserCode!)
+            .ToDictionary(group => group.Key.Trim(), group => group.First().UserName, StringComparer.OrdinalIgnoreCase);
+
+        var requestedCardCodes = cardCodes.Values.Where(code => code != null).Select(code => code!).Distinct().ToList();
+        var details = await LoadInChunksAsync(requestedCardCodes, batch => database.DtlMstRows.AsNoTracking()
+            .Where(row => row.DtlTblCod == "CRDTBL" && row.DtlCod != null && batch.Contains(row.DtlCod))
+            .Select(row => new RppayCardNameRow(row.DtlCod, row.DtlCodNam))
+            .ToListAsync());
+        var cardNames = details.Where(row => row.Code != null).GroupBy(row => row.Code!.Trim())
+            .ToDictionary(group => group.Key, group => group.First().Name, StringComparer.OrdinalIgnoreCase);
+
+        var preparedRows = filteredRows
+            .Select(row =>
+            {
+                var source = row.Source;
+                cardCodes.TryGetValue(source.OcmNumber?.Trim() ?? "", out var cardCode);
+                userNames.TryGetValue(source.UserCode ?? "", out var userName);
+                cardNames.TryGetValue(cardCode ?? "", out var cardName);
+                contractDiscounts.TryGetValue(source.OcmNumber?.Trim() ?? "", out var contractDiscount);
+                patientTypes.TryGetValue(source.OcmNumber?.Trim() ?? "", out var patientType);
+                var contractAmount = row.IsFirstVisitRow ? contractDiscount : 0m;
+                var status = patientType == "I" ? "IPD" : patientType == "O" ? "OPD" : patientType ?? "";
+                return new
+                {
+                    source.DateKey,
+                    UserName = userName ?? "",
+                    Status = status,
+                    Type = row.InsuranceType ?? "",
+                    CardCode = cardCode ?? "",
+                    CardName = cardName ?? "",
+                    NetAmount = source.Amount - source.DCCash - contractAmount,
+                    DiscountAmount = source.DCCash + contractAmount
+                };
+            })
+            .ToList();
+
+        var byUser = preparedRows
+            .GroupBy(row => new { row.DateKey, row.UserName, row.CardCode, row.CardName })
+            .Select(group => new RppayDailyRow(
+                group.Key.DateKey,
+                group.Key.UserName,
+                group.Key.CardCode,
+                group.Key.CardName,
+                group.Sum(row => row.NetAmount)))
+            .OrderBy(row => row.DateKey)
+            .ThenBy(row => row.UserName, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(row => row.Code, StringComparer.Ordinal)
+            .ToList();
+
+        var byType = preparedRows
+            .GroupBy(row => new { row.DateKey, row.Status, row.Type, row.CardCode, row.CardName })
+            .Select(group => new RppayByTypeRow(
+                group.Key.DateKey,
+                group.Key.Status,
+                group.Key.Type,
+                group.Key.CardCode,
+                group.Key.CardName,
+                group.Sum(row => row.NetAmount),
+                group.Sum(row => row.DiscountAmount)))
+            .OrderBy(row => row.DateKey)
+            .ThenBy(row => row.Status, StringComparer.Ordinal)
+            .ThenBy(row => row.Type, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(row => row.Code, StringComparer.Ordinal)
+            .ToList();
+
+        return new RppayQueryRows(byUser, byType);
+    }
+
     public static async Task<List<RatioByTimeRow>> GetRatioByTimeRowsAsync(
         ReportDbContext database,
         DateTime startDate,
@@ -347,6 +610,34 @@ public static class ReportDataQueries
         public string TimeCode { get; set; } = "";
         public int VisitTotal { get; set; }
     }
+
+    private sealed record RppaySourceRow(
+        string? OcmNumber,
+        string ContractCode,
+        short? InsuranceCode,
+        string? UserCode,
+        string UpdateDateTime,
+        string DateKey,
+        decimal Amount,
+        decimal DCCash);
+
+    private sealed class RppayFilteredRow(RppaySourceRow source, string? insuranceType)
+    {
+        public RppaySourceRow Source { get; } = source;
+        public string? InsuranceType { get; } = insuranceType;
+        public bool IsFirstVisitRow { get; set; }
+    }
+
+    private sealed record RppayDiscountRow(
+        string? OcmNumber,
+        decimal? TotalAmount,
+        decimal? CheckAmount,
+        string? ContractType);
+
+    private sealed record RppayPatientStatusRow(string? OcmNumber, string? PatientType);
+    private sealed record RppayCardInfoRow(string? OcmNumber, string? Code);
+    private sealed record RppayUserRow(string? UserCode, string? UserName);
+    private sealed record RppayCardNameRow(string? Code, string? Name);
 }
 
 public sealed record OperationalDailyRow(
@@ -382,5 +673,49 @@ public sealed record OpdPatientDailyRow(
     public int NewTotal => NewMale + NewFemale + NewChild;
     public int Total => OldTotal + NewTotal;
 }
+
+public sealed record WardDailyCountRow(
+    string DateKey,
+    string? WardCode,
+    string PatientGroup,
+    int WardInfo,
+    int NewAdmit,
+    int Discharge);
+
+public sealed record DepartmentOpdPatientDailyRow(
+    string DateKey,
+    string DepName,
+    int OldMale,
+    int OldFemale,
+    int NewMale,
+    int NewFemale,
+    int Total)
+{
+    public DateTime VisitDate => DateTime.ParseExact(DateKey, "yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture);
+}
+
+public sealed record RppayDailyRow(
+    string DateKey,
+    string UserName,
+    string Code,
+    string CardName,
+    decimal NetAmount)
+{
+    public DateTime Date => DateTime.ParseExact(DateKey, "yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture);
+}
+
+public sealed record RppayByTypeRow(
+    string DateKey,
+    string Status,
+    string Type,
+    string Code,
+    string CardName,
+    decimal SumTotalAmount,
+    decimal SumDiscount)
+{
+    public DateTime Date => DateTime.ParseExact(DateKey, "yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture);
+}
+
+public sealed record RppayQueryRows(List<RppayDailyRow> ByUser, List<RppayByTypeRow> ByType);
 
 public sealed record RatioByTimeRow(DateTime VisitDate, string DepName, string TimeCode, int Total);
